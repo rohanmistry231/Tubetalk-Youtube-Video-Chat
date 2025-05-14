@@ -1,0 +1,8 @@
+streamlit
+streamlit-option-menu
+youtube-transcript-api
+langchain
+langchain-community
+sentence-transformers
+huggingface_hub
+faiss-cpu
