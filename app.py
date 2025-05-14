@@ -1,4 +1,3 @@
-import os
 import streamlit as st
 from streamlit_option_menu import option_menu
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
@@ -12,7 +11,6 @@ from huggingface_hub import InferenceClient
 import re
 import warnings
 import logging
-import uuid
 from datetime import datetime
 import io
 import streamlit.components.v1 as components
@@ -84,23 +82,56 @@ def extract_video_id(url):
 
 # Fetch transcript with multi-language support, detailed logging, and retry mechanism
 def get_transcript(video_id, preferred_language="en"):
+    """
+    Fetch transcript with multi-language support, improved error handling, and exponential backoff retry.
+    """
     supported_languages = ["hi", "gu", "mr", "en", "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ko"]
-    retry_count = 1  # Number of retries
-    retry_delay = 2  # Delay between retries in seconds
-
-    for attempt in range(retry_count + 1):
+    max_retries = 3  # Increased number of retries
+    base_delay = 1  # Initial delay in seconds
+    
+    # Try to get transcript in preferred language first
+    for attempt in range(max_retries):
         try:
-            logger.info(f"Attempt {attempt + 1}/{retry_count + 1}: Fetching transcript for video_id: {video_id} in language: {preferred_language}")
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[preferred_language])
-            transcript = " ".join(chunk["text"] for chunk in transcript_list)
-            logger.info(f"Successfully fetched transcript in {preferred_language}")
-            return transcript, transcript_list, preferred_language
+            retry_delay = base_delay * (2 ** attempt)  # Exponential backoff
+            logger.info(f"Attempt {attempt + 1}/{max_retries}: Fetching transcript for video_id: {video_id} in language: {preferred_language}")
+            
+            # Use a different approach for fetching transcripts
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # Try to find the preferred language transcript
+            try:
+                transcript = transcript_list.find_transcript([preferred_language])
+                fetched_transcript = transcript.fetch()
+                transcript_text = " ".join(chunk["text"] for chunk in fetched_transcript)
+                logger.info(f"Successfully fetched transcript in {preferred_language}")
+                return transcript_text, fetched_transcript, preferred_language
+            except Exception as lang_e:
+                logger.warning(f"Could not find transcript in {preferred_language}. Error: {str(lang_e)}")
+                
+                # Try to get any available transcript
+                try:
+                    available_transcripts = list(transcript_list)
+                    if available_transcripts:
+                        # Get the first available transcript
+                        default_transcript = available_transcripts[0]
+                        used_lang = default_transcript.language_code
+                        fetched_transcript = default_transcript.fetch()
+                        transcript_text = " ".join(chunk["text"] for chunk in fetched_transcript)
+                        logger.info(f"Successfully fetched transcript in {used_lang}")
+                        return transcript_text, fetched_transcript, used_lang
+                except Exception as e:
+                    logger.error(f"Failed to fetch any transcript. Error: {str(e)}")
+        
         except TranscriptsDisabled as e:
             logger.error(f"Transcripts disabled for video_id: {video_id}. Error: {str(e)}")
             return None, None, None
         except Exception as e:
-            logger.error(f"Attempt {attempt + 1}/{retry_count + 1}: Failed to fetch transcript in {preferred_language}. Error: {str(e)}")
-            if attempt == retry_count:  # Last attempt
+            logger.error(f"Attempt {attempt + 1}/{max_retries}: Failed to fetch transcript. Error: {str(e)}")
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying after {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                # Last attempt - try manual language fallback
                 for lang in supported_languages:
                     if lang != preferred_language:
                         try:
@@ -112,11 +143,10 @@ def get_transcript(video_id, preferred_language="en"):
                         except Exception as inner_e:
                             logger.error(f"Failed to fetch transcript in {lang}. Error: {str(inner_e)}")
                             continue
-                logger.error(f"No transcript available in any supported language for video_id: {video_id}")
-                return None, None, None
-            else:
-                logger.info(f"Retrying after {retry_delay} seconds...")
-                time.sleep(retry_delay)
+    
+    # Add a more detailed error message
+    logger.error(f"No transcript available in any supported language for video_id: {video_id}")
+    return None, None, None
 
 # Process transcript
 def process_transcript(transcript):
