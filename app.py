@@ -1,9 +1,6 @@
-import os
 import streamlit as st
 from streamlit_option_menu import option_menu
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
-from googleapiclient.discovery import build  # For YouTube Data API
-from googleapiclient.errors import HttpError
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.runnables import RunnableParallel, RunnablePassthrough, RunnableLambda
@@ -14,7 +11,6 @@ from huggingface_hub import InferenceClient
 import re
 import warnings
 import logging
-import uuid
 from datetime import datetime
 import io
 import streamlit.components.v1 as components
@@ -40,20 +36,11 @@ st.set_page_config(
     page_icon="🎥"
 )
 
-# Retrieve API token, proxy settings, and YouTube API key
+# Retrieve API token
 HF_API_TOKEN = st.secrets.get("HF_API_TOKEN", "")
 if not HF_API_TOKEN:
     st.error("Hugging Face API token not found. Please set HF_API_TOKEN in your secrets.toml file or Streamlit Cloud secrets. Get your token from https://huggingface.co/settings/tokens.")
     st.stop()
-
-PROXY_URL = st.secrets.get("PROXY_URL", os.getenv("PROXY_URL", None))
-proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
-if not PROXY_URL:
-    logger.warning("No proxy URL provided. Requests may be blocked by YouTube if running on a cloud provider.")
-
-YOUTUBE_API_KEY = st.secrets.get("YOUTUBE_API_KEY", os.getenv("YOUTUBE_API_KEY", None))
-if not YOUTUBE_API_KEY:
-    logger.warning("No YouTube API key provided. Falling back to youtube-transcript-api, which may fail due to IP blocking.")
 
 # Initialize models
 @st.cache_resource
@@ -93,84 +80,22 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-# Fetch transcript using YouTube Data API as a fallback
-def get_transcript_with_youtube_api(video_id, preferred_language="en"):
-    try:
-        youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-        # Get available captions
-        captions = youtube.captions().list(
-            part="snippet",
-            videoId=video_id
-        ).execute()
-
-        # Find a matching caption track for the preferred language
-        caption_id = None
-        used_language = None
-        for item in captions.get("items", []):
-            lang = item["snippet"]["language"]
-            if lang == preferred_language:
-                caption_id = item["id"]
-                used_language = lang
-                break
-        if not caption_id:
-            # Fallback to any available language
-            for item in captions.get("items", []):
-                caption_id = item["id"]
-                used_language = item["snippet"]["language"]
-                break
-
-        if not caption_id:
-            logger.error(f"No captions available for video_id: {video_id}")
-            return None, None, None
-
-        # Download the caption track
-        caption = youtube.captions().download(
-            id=caption_id,
-            tfmt="srt"
-        ).execute()
-
-        # Parse the SRT content
-        transcript = ""
-        transcript_list = []
-        lines = caption.decode("utf-8").split("\n\n")
-        for block in lines:
-            parts = block.split("\n")
-            if len(parts) >= 3:
-                text = " ".join(parts[2:])
-                transcript += text + " "
-                transcript_list.append({"text": text})
-
-        logger.info(f"Successfully fetched transcript using YouTube API in language: {used_language}")
-        return transcript.strip(), transcript_list, used_language
-
-    except HttpError as e:
-        logger.error(f"Failed to fetch transcript using YouTube API. Error: {str(e)}")
-        return None, None, None
-    except Exception as e:
-        logger.error(f"Unexpected error while fetching transcript with YouTube API: {str(e)}")
-        return None, None, None
-
-# Fetch transcript with proxy support, multi-language support, and fallback to YouTube API
+# Fetch transcript with multi-language support, detailed logging, and retry mechanism
 def get_transcript(video_id, preferred_language="en"):
     supported_languages = ["hi", "gu", "mr", "en", "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ko"]
     retry_count = 1  # Number of retries
     retry_delay = 2  # Delay between retries in seconds
 
-    # First attempt using youtube-transcript-api
     for attempt in range(retry_count + 1):
         try:
-            logger.info(f"Attempt {attempt + 1}/{retry_count + 1}: Fetching transcript for video_id: {video_id} in language: {preferred_language} using youtube-transcript-api")
-            transcript_list = YouTubeTranscriptApi.get_transcript(
-                video_id,
-                languages=[preferred_language],
-                proxies=proxies
-            )
+            logger.info(f"Attempt {attempt + 1}/{retry_count + 1}: Fetching transcript for video_id: {video_id} in language: {preferred_language}")
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[preferred_language])
             transcript = " ".join(chunk["text"] for chunk in transcript_list)
             logger.info(f"Successfully fetched transcript in {preferred_language}")
             return transcript, transcript_list, preferred_language
         except TranscriptsDisabled as e:
             logger.error(f"Transcripts disabled for video_id: {video_id}. Error: {str(e)}")
-            break
+            return None, None, None
         except Exception as e:
             logger.error(f"Attempt {attempt + 1}/{retry_count + 1}: Failed to fetch transcript in {preferred_language}. Error: {str(e)}")
             if attempt == retry_count:  # Last attempt
@@ -178,29 +103,18 @@ def get_transcript(video_id, preferred_language="en"):
                     if lang != preferred_language:
                         try:
                             logger.info(f"Falling back to language: {lang}")
-                            transcript_list = YouTubeTranscriptApi.get_transcript(
-                                video_id,
-                                languages=[lang],
-                                proxies=proxies
-                            )
+                            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
                             transcript = " ".join(chunk["text"] for chunk in transcript_list)
                             logger.info(f"Successfully fetched transcript in {lang}")
                             return transcript, transcript_list, lang
                         except Exception as inner_e:
                             logger.error(f"Failed to fetch transcript in {lang}. Error: {str(inner_e)}")
                             continue
-                break
+                logger.error(f"No transcript available in any supported language for video_id: {video_id}")
+                return None, None, None
             else:
                 logger.info(f"Retrying after {retry_delay} seconds...")
                 time.sleep(retry_delay)
-
-    # If youtube-transcript-api fails, try YouTube Data API as a fallback
-    if YOUTUBE_API_KEY:
-        logger.info(f"Falling back to YouTube Data API for video_id: {video_id}")
-        return get_transcript_with_youtube_api(video_id, preferred_language)
-
-    logger.error(f"No transcript available in any supported language for video_id: {video_id}")
-    return None, None, None
 
 # Process transcript
 def process_transcript(transcript):
@@ -382,9 +296,7 @@ def home_page():
     ### Important Notes
     - Ensure the YouTube video has captions in at least one supported language for transcript processing.
     - A valid Hugging Face API token is required in your `secrets.toml` file.
-    - A YouTube API key is recommended to bypass IP blocking issues. Set YOUTUBE_API_KEY in your secrets.toml file.
     - For API token, visit [Hugging Face](https://huggingface.co/settings/tokens).
-    - For YouTube API key, visit [Google Cloud Console](https://console.cloud.google.com/apis/credentials).
 
     ### Get Started
     Select the **Chat** page from the sidebar to start exploring YouTube videos!
@@ -487,16 +399,7 @@ def chat_page():
                 st.success(f"Transcript processed successfully in {language_name}!")
                 st.session_state.chat_history = []
             else:
-                error_msg = (
-                    "Failed to fetch transcript. This may be due to one of the following reasons:\n"
-                    "- The video does not have captions in the selected or any supported language.\n"
-                    "- YouTube is blocking requests from this server’s IP address (common on cloud providers like Streamlit Cloud).\n"
-                    "Solutions:\n"
-                    "- Ensure a valid proxy is configured (set PROXY_URL in Streamlit Cloud secrets).\n"
-                    "- Alternatively, set up a YouTube API key (YOUTUBE_API_KEY in secrets.toml) to bypass IP restrictions.\n"
-                    "If the issue persists, check the app logs in Streamlit Cloud under 'Manage app' for more details."
-                )
-                st.error(error_msg)
+                st.error("Failed to fetch transcript. The video may not have captions in the selected or any supported language. Try a different video or language, or check the app logs in Streamlit Cloud under 'Manage app' for more details.")
                 st.session_state.transcript = None
                 st.session_state.transcript_list = None
                 st.session_state.vector_store = None
