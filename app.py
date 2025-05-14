@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime
 import io
 import streamlit.components.v1 as components
+import time
 
 # Configure logging to capture errors
 logging.basicConfig(level=logging.INFO)
@@ -81,33 +82,41 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-# Fetch transcript with multi-language support and detailed error logging
+# Fetch transcript with multi-language support, detailed logging, and retry mechanism
 def get_transcript(video_id, preferred_language="en"):
     supported_languages = ["hi", "gu", "mr", "en", "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ko"]
-    try:
-        logger.info(f"Attempting to fetch transcript for video_id: {video_id} in language: {preferred_language}")
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[preferred_language])
-        transcript = " ".join(chunk["text"] for chunk in transcript_list)
-        logger.info(f"Successfully fetched transcript in {preferred_language}")
-        return transcript, transcript_list, preferred_language
-    except TranscriptsDisabled as e:
-        logger.error(f"Transcripts disabled for video_id: {video_id}. Error: {str(e)}")
-        return None, None, None
-    except Exception as e:
-        logger.error(f"Failed to fetch transcript in {preferred_language}. Error: {str(e)}")
-        for lang in supported_languages:
-            if lang != preferred_language:
-                try:
-                    logger.info(f"Falling back to language: {lang}")
-                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
-                    transcript = " ".join(chunk["text"] for chunk in transcript_list)
-                    logger.info(f"Successfully fetched transcript in {lang}")
-                    return transcript, transcript_list, lang
-                except Exception as inner_e:
-                    logger.error(f"Failed to fetch transcript in {lang}. Error: {str(inner_e)}")
-                    continue
-        logger.error(f"No transcript available in any supported language for video_id: {video_id}")
-        return None, None, None
+    retry_count = 1  # Number of retries
+    retry_delay = 2  # Delay between retries in seconds
+
+    for attempt in range(retry_count + 1):
+        try:
+            logger.info(f"Attempt {attempt + 1}/{retry_count + 1}: Fetching transcript for video_id: {video_id} in language: {preferred_language}")
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[preferred_language])
+            transcript = " ".join(chunk["text"] for chunk in transcript_list)
+            logger.info(f"Successfully fetched transcript in {preferred_language}")
+            return transcript, transcript_list, preferred_language
+        except TranscriptsDisabled as e:
+            logger.error(f"Transcripts disabled for video_id: {video_id}. Error: {str(e)}")
+            return None, None, None
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1}/{retry_count + 1}: Failed to fetch transcript in {preferred_language}. Error: {str(e)}")
+            if attempt == retry_count:  # Last attempt
+                for lang in supported_languages:
+                    if lang != preferred_language:
+                        try:
+                            logger.info(f"Falling back to language: {lang}")
+                            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
+                            transcript = " ".join(chunk["text"] for chunk in transcript_list)
+                            logger.info(f"Successfully fetched transcript in {lang}")
+                            return transcript, transcript_list, lang
+                        except Exception as inner_e:
+                            logger.error(f"Failed to fetch transcript in {lang}. Error: {str(inner_e)}")
+                            continue
+                logger.error(f"No transcript available in any supported language for video_id: {video_id}")
+                return None, None, None
+            else:
+                logger.info(f"Retrying after {retry_delay} seconds...")
+                time.sleep(retry_delay)
 
 # Process transcript
 def process_transcript(transcript):
@@ -392,7 +401,7 @@ def chat_page():
                 st.success(f"Transcript processed successfully in {language_name}!")
                 st.session_state.chat_history = []
             else:
-                st.error("Failed to fetch transcript. Check if the video has captions in the selected or any supported language. If this persists, check the app logs in Streamlit Cloud under 'Manage app' for more details.")
+                st.error("Failed to fetch transcript. The video may not have captions in the selected or any supported language. Try a different video or language, or check the app logs in Streamlit Cloud under 'Manage app' for more details.")
                 st.session_state.transcript = None
                 st.session_state.transcript_list = None
                 st.session_state.vector_store = None
