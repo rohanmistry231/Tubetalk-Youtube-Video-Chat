@@ -88,46 +88,29 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-# Fetch transcript with proxy support, multi-language support, detailed logging, and retry mechanism
-def get_transcript(video_id, preferred_language="en"):
-    supported_languages = ["hi", "gu", "mr", "en", "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ko"]
+# Fetch transcript with proxy support, simplified to fetch in default language, with retry mechanism
+def get_transcript(video_id):
     retry_count = 1  # Number of retries
     retry_delay = 2  # Delay between retries in seconds
 
     for attempt in range(retry_count + 1):
         try:
-            logger.info(f"Attempt {attempt + 1}/{retry_count + 1}: Fetching transcript for video_id: {video_id} in language: {preferred_language}")
+            logger.info(f"Attempt {attempt + 1}/{retry_count + 1}: Fetching transcript for video_id: {video_id}")
             transcript_list = YouTubeTranscriptApi.get_transcript(
                 video_id,
-                languages=[preferred_language],
                 proxies=proxies
             )
             transcript = " ".join(chunk["text"] for chunk in transcript_list)
-            logger.info(f"Successfully fetched transcript in {preferred_language}")
-            return transcript, transcript_list, preferred_language
+            logger.info("Successfully fetched transcript")
+            return transcript, transcript_list
         except TranscriptsDisabled as e:
             logger.error(f"Transcripts disabled for video_id: {video_id}. Error: {str(e)}")
-            return None, None, None
+            return None, None
         except Exception as e:
-            logger.error(f"Attempt {attempt + 1}/{retry_count + 1}: Failed to fetch transcript in {preferred_language}. Error: {str(e)}")
+            logger.error(f"Attempt {attempt + 1}/{retry_count + 1}: Failed to fetch transcript. Error: {str(e)}")
             if attempt == retry_count:  # Last attempt
-                for lang in supported_languages:
-                    if lang != preferred_language:
-                        try:
-                            logger.info(f"Falling back to language: {lang}")
-                            transcript_list = YouTubeTranscriptApi.get_transcript(
-                                video_id,
-                                languages=[lang],
-                                proxies=proxies
-                            )
-                            transcript = " ".join(chunk["text"] for chunk in transcript_list)
-                            logger.info(f"Successfully fetched transcript in {lang}")
-                            return transcript, transcript_list, lang
-                        except Exception as inner_e:
-                            logger.error(f"Failed to fetch transcript in {lang}. Error: {str(inner_e)}")
-                            continue
-                logger.error(f"No transcript available in any supported language for video_id: {video_id}")
-                return None, None, None
+                logger.error(f"No transcript available for video_id: {video_id}")
+                return None, None
             else:
                 logger.info(f"Retrying after {retry_delay} seconds...")
                 time.sleep(retry_delay)
@@ -282,7 +265,6 @@ def reset_transcript_state():
     st.session_state.vector_store = None
     st.session_state.video_id = None
     st.session_state.input_value = ""
-    st.session_state.selected_language = "en"
     st.session_state.chat_history = []
 
 # Home page
@@ -290,11 +272,11 @@ def home_page():
     st.title("Welcome to TubeTalk - YouTube Video Chat 🎥")
     st.markdown("""
     ### About This Application
-    TubeTalk allows you to interact with YouTube videos by asking questions based on their transcripts in multiple languages, including Hindi, Gujarati, and Marathi. Powered by advanced AI models from Hugging Face and LangChain, the app processes video transcripts to provide concise, informative answers.
+    TubeTalk allows you to interact with YouTube videos by asking questions based on their transcripts. Powered by advanced AI models from Hugging Face and LangChain, the app processes video transcripts to provide concise, informative answers.
 
     **Key Features:**
     - View the YouTube video instantly by pasting its URL.
-    - Ask questions about any YouTube video with captions in supported languages (e.g., Hindi, Gujarati, Marathi, English, etc.).
+    - Ask questions about any YouTube video with captions.
     - Receive smart responses tailored to your question's format (e.g., summaries, lists, or explanations).
     - View the full transcript and chat history within the app.
     - Download your chat history in Markdown format.
@@ -303,14 +285,13 @@ def home_page():
     ### How to Use This Application
     1. **Navigate to the Chat Page**: Use the sidebar to select the "Chat" option.
     2. **Enter a YouTube URL**: Paste a valid YouTube video URL to instantly view the video.
-    3. **Select a Language**: Choose your preferred transcript language from the dropdown.
-    4. **Process the Transcript**: Click "Process Video" to fetch and analyze the transcript.
-    5. **Ask Questions**: Type your question and click "Send" to get answers.
-    6. **Review Transcript**: Expand the transcript section to view the full text.
-    7. **Download Chat**: Use the "Download Chat" button to save your chat history as a Markdown file.
+    3. **Process the Transcript**: Click "Process Video" to fetch and analyze the transcript in the video's default language.
+    4. **Ask Questions**: Type your question and click "Send" to get answers.
+    5. **Review Transcript**: Expand the transcript section to view the full text.
+    6. **Download Chat**: Use the "Download Chat" button to save your chat history as a Markdown file.
 
     ### Important Notes
-    - Ensure the YouTube video has captions in at least one supported language for transcript processing.
+    - Ensure the YouTube video has captions for transcript processing.
     - A valid Hugging Face API token is required in your `secrets.toml` file.
     - For API token, visit [Hugging Face](https://huggingface.co/settings/tokens).
 
@@ -337,37 +318,13 @@ def chat_page():
 
     # Input section with proper alignment
     st.header("Video Input")
-    col1, col2, col3 = st.columns([3, 1, 1])
+    col1, col2 = st.columns([3, 1])
     with col1:
         youtube_url = st.text_input("Enter YouTube URL", placeholder="e.g., https://www.youtube.com/watch?v=Gfr50f6ZBvo", key="youtube_url")
         # Extract video ID immediately when URL is entered
         video_id = extract_video_id(youtube_url) if youtube_url else None
         st.session_state.video_id = video_id
     with col2:
-        language_options = {
-            "hi": "Hindi",
-            "gu": "Gujarati",
-            "mr": "Marathi",
-            "en": "English",
-            "es": "Spanish",
-            "fr": "French",
-            "de": "German",
-            "it": "Italian",
-            "pt": "Portuguese",
-            "ru": "Russian",
-            "zh": "Chinese",
-            "ja": "Japanese",
-            "ko": "Korean"
-        }
-        selected_language = st.selectbox(
-            "Select Transcript Language",
-            options=list(language_options.keys()),
-            format_func=lambda x: language_options[x],
-            key="language_select",
-            index=list(language_options.keys()).index(st.session_state.selected_language)
-        )
-        st.session_state.selected_language = selected_language
-    with col3:
         st.markdown(
             """
             <style>
@@ -401,7 +358,7 @@ def chat_page():
             return
         
         with st.spinner("Fetching and processing transcript..."):
-            transcript, transcript_list, used_language = get_transcript(video_id, preferred_language=st.session_state.selected_language)
+            transcript, transcript_list = get_transcript(video_id)
             if transcript:
                 st.session_state.transcript = transcript
                 st.session_state.transcript_list = transcript_list
@@ -411,15 +368,14 @@ def chat_page():
                     st.session_state.transcript_list = None
                     st.error("Failed to process transcript. Please try again.")
                     return
-                language_name = language_options.get(used_language, "Unknown")
-                st.success(f"Transcript processed successfully in {language_name}!")
+                st.success("Transcript processed successfully in the video's default language!")
                 st.session_state.chat_history = []
             else:
                 error_msg = (
                     "Failed to fetch transcript. This may be due to one of the following reasons:\n"
-                    "- The video does not have captions in the selected or any supported language.\n"
+                    "- The video does not have captions available.\n"
                     "- YouTube is blocking requests from this server’s IP address (common on cloud providers like Streamlit Cloud).\n"
-                    "Please try a different video or language. If the issue persists, check the app logs in Streamlit Cloud under 'Manage app' for more details, "
+                    "Please try a different video. If the issue persists, check the app logs in Streamlit Cloud under 'Manage app' for more details, "
                     "or contact the app owner to configure a proxy for transcript fetching."
                 )
                 st.error(error_msg)
