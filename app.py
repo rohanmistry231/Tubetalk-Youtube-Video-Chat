@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 from streamlit_option_menu import option_menu
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
@@ -11,6 +12,7 @@ from huggingface_hub import InferenceClient
 import re
 import warnings
 import logging
+import uuid
 from datetime import datetime
 import io
 import streamlit.components.v1 as components
@@ -36,11 +38,17 @@ st.set_page_config(
     page_icon="🎥"
 )
 
-# Retrieve API token
+# Retrieve API token and proxy settings
 HF_API_TOKEN = st.secrets.get("HF_API_TOKEN", "")
 if not HF_API_TOKEN:
     st.error("Hugging Face API token not found. Please set HF_API_TOKEN in your secrets.toml file or Streamlit Cloud secrets. Get your token from https://huggingface.co/settings/tokens.")
     st.stop()
+
+# Proxy configuration (set in Streamlit Cloud secrets or environment variables)
+PROXY_URL = st.secrets.get("PROXY_URL", os.getenv("PROXY_URL", None))
+proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+if not PROXY_URL:
+    logger.warning("No proxy URL provided. Requests may be blocked by YouTube if running on a cloud provider.")
 
 # Initialize models
 @st.cache_resource
@@ -80,73 +88,49 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-# Fetch transcript with multi-language support, detailed logging, and retry mechanism
+# Fetch transcript with proxy support, multi-language support, detailed logging, and retry mechanism
 def get_transcript(video_id, preferred_language="en"):
-    """
-    Fetch transcript with multi-language support, improved error handling, and exponential backoff retry.
-    """
     supported_languages = ["hi", "gu", "mr", "en", "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ko"]
-    max_retries = 3  # Increased number of retries
-    base_delay = 1  # Initial delay in seconds
-    
-    # Try to get transcript in preferred language first
-    for attempt in range(max_retries):
+    retry_count = 1  # Number of retries
+    retry_delay = 2  # Delay between retries in seconds
+
+    for attempt in range(retry_count + 1):
         try:
-            retry_delay = base_delay * (2 ** attempt)  # Exponential backoff
-            logger.info(f"Attempt {attempt + 1}/{max_retries}: Fetching transcript for video_id: {video_id} in language: {preferred_language}")
-            
-            # Use a different approach for fetching transcripts
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            
-            # Try to find the preferred language transcript
-            try:
-                transcript = transcript_list.find_transcript([preferred_language])
-                fetched_transcript = transcript.fetch()
-                transcript_text = " ".join(chunk["text"] for chunk in fetched_transcript)
-                logger.info(f"Successfully fetched transcript in {preferred_language}")
-                return transcript_text, fetched_transcript, preferred_language
-            except Exception as lang_e:
-                logger.warning(f"Could not find transcript in {preferred_language}. Error: {str(lang_e)}")
-                
-                # Try to get any available transcript
-                try:
-                    available_transcripts = list(transcript_list)
-                    if available_transcripts:
-                        # Get the first available transcript
-                        default_transcript = available_transcripts[0]
-                        used_lang = default_transcript.language_code
-                        fetched_transcript = default_transcript.fetch()
-                        transcript_text = " ".join(chunk["text"] for chunk in fetched_transcript)
-                        logger.info(f"Successfully fetched transcript in {used_lang}")
-                        return transcript_text, fetched_transcript, used_lang
-                except Exception as e:
-                    logger.error(f"Failed to fetch any transcript. Error: {str(e)}")
-        
+            logger.info(f"Attempt {attempt + 1}/{retry_count + 1}: Fetching transcript for video_id: {video_id} in language: {preferred_language}")
+            transcript_list = YouTubeTranscriptApi.get_transcript(
+                video_id,
+                languages=[preferred_language],
+                proxies=proxies
+            )
+            transcript = " ".join(chunk["text"] for chunk in transcript_list)
+            logger.info(f"Successfully fetched transcript in {preferred_language}")
+            return transcript, transcript_list, preferred_language
         except TranscriptsDisabled as e:
             logger.error(f"Transcripts disabled for video_id: {video_id}. Error: {str(e)}")
             return None, None, None
         except Exception as e:
-            logger.error(f"Attempt {attempt + 1}/{max_retries}: Failed to fetch transcript. Error: {str(e)}")
-            if attempt < max_retries - 1:
-                logger.info(f"Retrying after {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:
-                # Last attempt - try manual language fallback
+            logger.error(f"Attempt {attempt + 1}/{retry_count + 1}: Failed to fetch transcript in {preferred_language}. Error: {str(e)}")
+            if attempt == retry_count:  # Last attempt
                 for lang in supported_languages:
                     if lang != preferred_language:
                         try:
                             logger.info(f"Falling back to language: {lang}")
-                            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
+                            transcript_list = YouTubeTranscriptApi.get_transcript(
+                                video_id,
+                                languages=[lang],
+                                proxies=proxies
+                            )
                             transcript = " ".join(chunk["text"] for chunk in transcript_list)
                             logger.info(f"Successfully fetched transcript in {lang}")
                             return transcript, transcript_list, lang
                         except Exception as inner_e:
                             logger.error(f"Failed to fetch transcript in {lang}. Error: {str(inner_e)}")
                             continue
-    
-    # Add a more detailed error message
-    logger.error(f"No transcript available in any supported language for video_id: {video_id}")
-    return None, None, None
+                logger.error(f"No transcript available in any supported language for video_id: {video_id}")
+                return None, None, None
+            else:
+                logger.info(f"Retrying after {retry_delay} seconds...")
+                time.sleep(retry_delay)
 
 # Process transcript
 def process_transcript(transcript):
@@ -431,7 +415,14 @@ def chat_page():
                 st.success(f"Transcript processed successfully in {language_name}!")
                 st.session_state.chat_history = []
             else:
-                st.error("Failed to fetch transcript. The video may not have captions in the selected or any supported language. Try a different video or language, or check the app logs in Streamlit Cloud under 'Manage app' for more details.")
+                error_msg = (
+                    "Failed to fetch transcript. This may be due to one of the following reasons:\n"
+                    "- The video does not have captions in the selected or any supported language.\n"
+                    "- YouTube is blocking requests from this server’s IP address (common on cloud providers like Streamlit Cloud).\n"
+                    "Please try a different video or language. If the issue persists, check the app logs in Streamlit Cloud under 'Manage app' for more details, "
+                    "or contact the app owner to configure a proxy for transcript fetching."
+                )
+                st.error(error_msg)
                 st.session_state.transcript = None
                 st.session_state.transcript_list = None
                 st.session_state.vector_store = None
