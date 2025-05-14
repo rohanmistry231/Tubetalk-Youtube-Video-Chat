@@ -17,7 +17,11 @@ from datetime import datetime
 import io
 import streamlit.components.v1 as components
 
-# Suppress all warnings and runtime errors
+# Configure logging to capture errors
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Suppress all warnings and runtime errors for other libraries
 warnings.filterwarnings("ignore")
 logging.getLogger("transformers").setLevel(logging.CRITICAL)
 logging.getLogger("langchain").setLevel(logging.CRITICAL)
@@ -77,24 +81,32 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-# Fetch transcript with multi-language support
+# Fetch transcript with multi-language support and detailed error logging
 def get_transcript(video_id, preferred_language="en"):
     supported_languages = ["hi", "gu", "mr", "en", "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ko"]
     try:
+        logger.info(f"Attempting to fetch transcript for video_id: {video_id} in language: {preferred_language}")
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[preferred_language])
         transcript = " ".join(chunk["text"] for chunk in transcript_list)
+        logger.info(f"Successfully fetched transcript in {preferred_language}")
         return transcript, transcript_list, preferred_language
-    except TranscriptsDisabled:
+    except TranscriptsDisabled as e:
+        logger.error(f"Transcripts disabled for video_id: {video_id}. Error: {str(e)}")
         return None, None, None
     except Exception as e:
+        logger.error(f"Failed to fetch transcript in {preferred_language}. Error: {str(e)}")
         for lang in supported_languages:
             if lang != preferred_language:
                 try:
+                    logger.info(f"Falling back to language: {lang}")
                     transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
                     transcript = " ".join(chunk["text"] for chunk in transcript_list)
+                    logger.info(f"Successfully fetched transcript in {lang}")
                     return transcript, transcript_list, lang
-                except:
+                except Exception as inner_e:
+                    logger.error(f"Failed to fetch transcript in {lang}. Error: {str(inner_e)}")
                     continue
+        logger.error(f"No transcript available in any supported language for video_id: {video_id}")
         return None, None, None
 
 # Process transcript
@@ -111,6 +123,7 @@ def process_transcript(transcript):
         )
         return vector_store
     except Exception as e:
+        logger.error(f"Error processing transcript: {str(e)}")
         st.error(f"Error processing transcript: {str(e)}")
         return None
 
@@ -220,6 +233,7 @@ def create_chain(vector_store):
         )
         return main_chain
     except Exception as e:
+        logger.error(f"Error creating retrieval chain: {str(e)}")
         st.error(f"Error creating retrieval chain: {str(e)}")
         return None
 
@@ -353,7 +367,7 @@ def chat_page():
         else:
             st.info("No video loaded. Paste a valid YouTube URL to view the video here.")
 
-    # Process transcript (moved before transcript section to ensure immediate update)
+    # Process transcript
     if process_button and youtube_url:
         video_id = extract_video_id(youtube_url)
         if not video_id:
@@ -378,12 +392,12 @@ def chat_page():
                 st.success(f"Transcript processed successfully in {language_name}!")
                 st.session_state.chat_history = []
             else:
-                st.error("Failed to fetch transcript. Check if the video has captions in the selected or any supported language.")
+                st.error("Failed to fetch transcript. Check if the video has captions in the selected or any supported language. If this persists, check the app logs in Streamlit Cloud under 'Manage app' for more details.")
                 st.session_state.transcript = None
                 st.session_state.transcript_list = None
                 st.session_state.vector_store = None
 
-    # Transcript section (moved after processing to reflect updated transcript immediately)
+    # Transcript section
     with st.expander("View Transcript", expanded=False):
         transcript_key = f"transcript_area_{st.session_state.video_id or 'default'}"
         transcript_value = st.session_state.transcript if st.session_state.transcript else "No transcript available"
