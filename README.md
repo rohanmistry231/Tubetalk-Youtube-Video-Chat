@@ -52,7 +52,7 @@ Follow these steps to set up and run TubeTalk - YouTube Video Chat locally.
 1. **Clone the Repository**
 
    ```bash
-   git clone https://github.com/your-username/Tubetalk-Youtube-Video-Chat.git
+   git clone https://github.com/rohanmistry231/Tubetalk-Youtube-Video-Chat
    cd Tubetalk-Youtube-Video-Chat
    ```
 
