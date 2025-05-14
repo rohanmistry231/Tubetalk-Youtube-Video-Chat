@@ -1,0 +1,26 @@
+# Streamlit configuration
+.streamlit/
+
+# Python-specific exclusions
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Common temporary files
+*.log
+.DS_Store
+*.swp
+*~
+
+# IDE-specific files
+.vscode/
+.idea/
