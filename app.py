@@ -86,7 +86,7 @@ def get_transcript(video_id, preferred_language="en"):
         return transcript, transcript_list, preferred_language
     except TranscriptsDisabled:
         return None, None, None
-    except Exception:
+    except Exception as e:
         for lang in supported_languages:
             if lang != preferred_language:
                 try:
@@ -238,12 +238,22 @@ def format_chat_history_as_markdown():
     
     return markdown_content
 
+# Reset transcript-related state on page load/refresh
+def reset_transcript_state():
+    st.session_state.transcript = None
+    st.session_state.transcript_list = None
+    st.session_state.vector_store = None
+    st.session_state.video_id = None
+    st.session_state.input_value = ""
+    st.session_state.selected_language = "en"
+    st.session_state.chat_history = []
+
 # Home page
 def home_page():
     st.title("Welcome to TubeTalk - YouTube Video Chat 🎥")
     st.markdown("""
     ### About This Application
-    YouTube Video Chat allows you to interact with YouTube videos by asking questions based on their transcripts in multiple languages, including Hindi, Gujarati, and Marathi. Powered by advanced AI models from Hugging Face and LangChain, the app processes video transcripts to provide concise, informative answers.
+    TubeTalk allows you to interact with YouTube videos by asking questions based on their transcripts in multiple languages, including Hindi, Gujarati, and Marathi. Powered by advanced AI models from Hugging Face and LangChain, the app processes video transcripts to provide concise, informative answers.
 
     **Key Features:**
     - View the YouTube video instantly by pasting its URL.
@@ -275,21 +285,14 @@ def home_page():
 def chat_page():
     st.title("Chat with YouTube Video")
     
-    # Initialize session state
-    if 'vector_store' not in st.session_state:
-        st.session_state.vector_store = None
-    if 'transcript' not in st.session_state:
-        st.session_state.transcript = None
-    if 'transcript_list' not in st.session_state:
-        st.session_state.transcript_list = None
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
-    if 'input_value' not in st.session_state:
-        st.session_state.input_value = ""
-    if 'selected_language' not in st.session_state:
-        st.session_state.selected_language = "en"
-    if 'video_id' not in st.session_state:
-        st.session_state.video_id = None
+    # Initialize session state with a flag to detect first run
+    if 'app_initialized' not in st.session_state:
+        st.session_state.app_initialized = False
+
+    # Reset transcript state on first run or page refresh
+    if not st.session_state.app_initialized:
+        reset_transcript_state()
+        st.session_state.app_initialized = True
 
     # Debug mode toggle
     with st.sidebar:
@@ -350,13 +353,41 @@ def chat_page():
         else:
             st.info("No video loaded. Paste a valid YouTube URL to view the video here.")
 
-    # Transcript section
+    # Process transcript (moved before transcript section to ensure immediate update)
+    if process_button and youtube_url:
+        video_id = extract_video_id(youtube_url)
+        if not video_id:
+            st.error("Invalid YouTube URL. Please enter a valid URL.")
+            st.session_state.transcript = None
+            st.session_state.transcript_list = None
+            st.session_state.vector_store = None
+            return
+        
+        with st.spinner("Fetching and processing transcript..."):
+            transcript, transcript_list, used_language = get_transcript(video_id, preferred_language=st.session_state.selected_language)
+            if transcript:
+                st.session_state.transcript = transcript
+                st.session_state.transcript_list = transcript_list
+                st.session_state.vector_store = process_transcript(transcript)
+                if st.session_state.vector_store is None:
+                    st.session_state.transcript = None
+                    st.session_state.transcript_list = None
+                    st.error("Failed to process transcript. Please try again.")
+                    return
+                language_name = language_options.get(used_language, "Unknown")
+                st.success(f"Transcript processed successfully in {language_name}!")
+                st.session_state.chat_history = []
+            else:
+                st.error("Failed to fetch transcript. Check if the video has captions in the selected or any supported language.")
+                st.session_state.transcript = None
+                st.session_state.transcript_list = None
+                st.session_state.vector_store = None
+
+    # Transcript section (moved after processing to reflect updated transcript immediately)
     with st.expander("View Transcript", expanded=False):
-        transcript_placeholder = st.empty()
-        if st.session_state.transcript:
-            transcript_placeholder.text_area("Transcript", st.session_state.transcript, height=200)
-        else:
-            transcript_placeholder.text_area("Transcript", "No transcript available", height=200)
+        transcript_key = f"transcript_area_{st.session_state.video_id or 'default'}"
+        transcript_value = st.session_state.transcript if st.session_state.transcript else "No transcript available"
+        st.text_area("Transcript", transcript_value, height=200, key=transcript_key)
 
     # Chat section
     st.header("Chat")
@@ -384,17 +415,21 @@ def chat_page():
 
     ask_button = st.button("Send", key="ask_button")
 
-    # Buttons layout (Clear Chat and Download Chat)
+    # Buttons layout (Clear Chat and Download Chat) with adjusted spacing
     st.markdown(
         """
         <style>
+        .button-container {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
         div.stButton > button.clear-chat-button {
             background-color: #ff4b4b;
             color: white;
             border: none;
             padding: 8px 16px;
             border-radius: 5px;
-            margin-top: 10px;
         }
         div.stButton > button.clear-chat-button:hover {
             background-color: #e04343;
@@ -405,7 +440,6 @@ def chat_page():
             border: none;
             padding: 8px 16px;
             border-radius: 5px;
-            margin-top: 10px;
         }
         div.stButton > button.download-chat-button:hover {
             background-color: #437de0;
@@ -415,55 +449,26 @@ def chat_page():
         unsafe_allow_html=True
     )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        clear_chat_button = st.button("Clear Chat", key="clear_chat_button", help="Clear the chat history and start fresh", type="primary")
-    with col2:
-        markdown_content = format_chat_history_as_markdown()
-        buffer = io.StringIO()
-        buffer.write(markdown_content)
-        st.download_button(
-            label="Download Chat",
-            data=buffer.getvalue(),
-            file_name="chat_history.md",
-            mime="text/markdown",
-            key="download_chat_button",
-            help="Download the chat history as a Markdown file",
-            type="primary"
-        )
-
-    # Process transcript
-    if process_button and youtube_url:
-        video_id = extract_video_id(youtube_url)
-        if not video_id:
-            st.error("Invalid YouTube URL. Please enter a valid URL.")
-            transcript_placeholder.text_area("Transcript", "No transcript available", height=200)
-            st.session_state.transcript = None
-            st.session_state.transcript_list = None
-            st.session_state.vector_store = None
-            return
-        
-        with st.spinner("Fetching and processing transcript..."):
-            transcript, transcript_list, used_language = get_transcript(video_id, preferred_language=st.session_state.selected_language)
-            if transcript:
-                st.session_state.transcript = transcript
-                st.session_state.transcript_list = transcript_list
-                st.session_state.vector_store = process_transcript(transcript)
-                if st.session_state.vector_store is None:
-                    st.session_state.transcript = None
-                    st.session_state.transcript_list = None
-                    st.error("Failed to process transcript. Please try again.")
-                    return
-                transcript_placeholder.text_area("Transcript", transcript, height=200)
-                language_name = language_options.get(used_language, "Unknown")
-                st.success(f"Transcript processed successfully in {language_name}!")
-                st.session_state.chat_history = []
-            else:
-                st.error("Failed to fetch transcript. Check if the video has captions in the selected or any supported language.")
-                transcript_placeholder.text_area("Transcript", "No transcript available", height=200)
-                st.session_state.transcript = None
-                st.session_state.transcript_list = None
-                st.session_state.vector_store = None
+    # Use a container with flexbox to control button spacing
+    with st.container():
+        st.markdown('<div class="button-container">', unsafe_allow_html=True)
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            clear_chat_button = st.button("Clear Chat", key="clear_chat_button", help="Clear the chat history and start fresh", type="primary")
+        with col2:
+            markdown_content = format_chat_history_as_markdown()
+            buffer = io.StringIO()
+            buffer.write(markdown_content)
+            st.download_button(
+                label="Download Chat",
+                data=buffer.getvalue(),
+                file_name="chat_history.md",
+                mime="text/markdown",
+                key="download_chat_button",
+                help="Download the chat history as a Markdown file",
+                type="primary"
+            )
+        st.markdown('</div>', unsafe_allow_html=True)
 
     # Handle question
     if ask_button:
